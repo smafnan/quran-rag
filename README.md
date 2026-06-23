@@ -21,6 +21,23 @@ python ask.py "..." --provider anthropic --api-key sk-ant-... --compose
 pytest -q   # 7 tests
 ```
 
+## 🖥️ Web UI (React + Tailwind + FastAPI)
+
+A serene search interface ships with the project: a single search bar, sample
+prompts, and elegant verse cards showing the `[chapter:verse]` reference, the text
+in a calligraphic serif, and a relevance bar — with a graceful "not addressed in
+the Quran" state when nothing matches.
+
+```bash
+pip install -e ".[web]"
+uvicorn api:app --reload          # open http://localhost:8000
+
+# (optional) rebuild / develop the frontend:
+cd web && npm install && npm run build   # outputs web/dist (served by the backend)
+```
+
+The committed `web/dist` means `uvicorn api:app` works straight from a clone.
+
 ## How it stays faithful to the source
 
 - **Default (no LLM)**: returns the relevant **verses verbatim** with their
