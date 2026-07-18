@@ -8,3 +8,4 @@ Thumbs.db
 .env
 web/node_modules/
 web/.vite/
+*.tsbuildinfo
