@@ -44,7 +44,10 @@ jobs:
 
       - name: Run the container
         run: |
+          # Same memory ceiling as Render's free tier, so an image that
+          # regresses past it is OOM-killed here instead of in production.
           docker run -d --name app -p 8000:7860 \
+            --memory=512m --memory-swap=512m \
             -e ASK_RATE_LIMIT=0 -e EXPLAIN_RATE_LIMIT=0 quran-rag:ci
           for i in $(seq 1 45); do
             if curl -fsS http://localhost:8000/healthz >/dev/null 2>&1; then
@@ -92,6 +95,14 @@ jobs:
           print("tafseer ok:", len(d["tafseer"]), "chars")
           PY
 
+          echo "--- the UI is served (StaticFiles mount is silently skipped if web/dist is absent) ---"
+          curl -fsS http://localhost:8000/ -o /tmp/index.html
+          grep -q '<div id="root"' /tmp/index.html
+          asset=$(grep -o '/assets/[^"]*\.js' /tmp/index.html | head -1)
+          test -n "$asset" || { echo "no JS asset referenced in index.html"; exit 1; }
+          curl -fsS "http://localhost:8000${asset}" -o /dev/null
+          echo "UI ok: index.html + ${asset}"
+
           echo "--- the relevance gate still refuses off-topic queries ---"
           curl -fsS -X POST http://localhost:8000/api/ask \
             -H 'Content-Type: application/json' \
@@ -103,10 +114,23 @@ jobs:
           print("relevance gate ok")
           PY
 
-      - name: Container memory footprint
+      - name: Enforce the memory budget
         run: |
           docker stats --no-stream --format '  {{.Name}}: {{.MemUsage}} ({{.MemPerc}})' app
-          echo "  free tier limit is 512 MiB"
+          used=$(docker stats --no-stream --format '{{.MemUsage}}' app | awk '{print $1}')
+          mib=$(python3 -c "
+          import re,sys
+          v='$used'
+          m=re.match(r'([0-9.]+)([A-Za-z]+)', v)
+          n=float(m.group(1)); u=m.group(2).lower()
+          print(int(n*{'b':1/1048576,'kib':1/1024,'mib':1,'gib':1024}.get(u,1)))
+          ")
+          echo "  resident ${mib} MiB of a 512 MiB budget"
+          # Render's free instance is 512 MiB; leave headroom for request spikes.
+          if [ "$mib" -gt 400 ]; then
+            echo "::error::container uses ${mib} MiB, over the 400 MiB CI ceiling"
+            exit 1
+          fi
 
       - name: Dump logs on failure
         if: failure()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 
@@ -239,3 +240,87 @@ def test_rate_limiter_window_expires():
 def test_rate_limit_of_zero_disables():
     rl = RateLimiter(0, 60)
     assert all(rl.check("a")[0] for _ in range(20))
+
+
+# --------------------------------------------- regression: deploy-review fixes
+
+import sqlite3
+import stat as _stat
+import subprocess
+
+from groundedrag import TafseerStore, client_key
+
+
+class _Req:
+    """Minimal stand-in for a Starlette request."""
+    def __init__(self, xff=None, peer="203.0.113.9"):
+        self.headers = {"x-forwarded-for": xff} if xff is not None else {}
+        self.client = type("C", (), {"host": peer})()
+
+
+def test_spoofed_forwarded_for_cannot_reset_the_rate_limit():
+    """The proxy appends the real IP, so the rightmost entry is the trustworthy
+    one. Reading the leftmost let a caller mint a fresh bucket per request."""
+    keys = {client_key(_Req(f"{i}.{i}.{i}.{i}, 198.51.100.7"), trusted_hops=1)
+            for i in range(5)}
+    assert keys == {"198.51.100.7"}
+
+
+def test_client_key_falls_back_to_the_socket():
+    assert client_key(_Req(), trusted_hops=1) == "203.0.113.9"
+    assert client_key(_Req(""), trusted_hops=1) == "203.0.113.9"
+    # no proxy in front: headers must be ignored entirely
+    assert client_key(_Req("1.1.1.1, 2.2.2.2"), trusted_hops=0) == "203.0.113.9"
+    # more hops claimed than present must clamp, never reach a spoofable entry
+    assert client_key(_Req("9.9.9.9"), trusted_hops=2) == "9.9.9.9"
+
+
+def _build_db(tmp_path, corpus="data/quran_sample.jsonl"):
+    root = Path(__file__).resolve().parents[1]
+    dest = tmp_path / "t.sqlite3"
+    subprocess.run([sys.executable, str(root / "scripts" / "build_tafseer_db.py"),
+                    str(root / corpus), str(dest)], check=True,
+                   capture_output=True)
+    return dest
+
+
+def test_tafseer_db_is_readable_by_other_users(tmp_path):
+    """Built as root in the image but served as uid 1000: mkstemp's 0600 would
+    make the app unable to open its own database and crash at startup."""
+    db = _build_db(tmp_path)
+    mode = _stat.S_IMODE(db.stat().st_mode)
+    assert mode & _stat.S_IROTH, f"db mode {oct(mode)} is not world-readable"
+
+
+def test_tafseer_store_roundtrip(tmp_path):
+    db = _build_db(tmp_path)
+    store = TafseerStore(db)
+    # the sample corpus carries no tafseer, so nothing should report as having any
+    assert len(store) == 0
+    assert store.has("1:1") is False
+    assert store.get("1:1") == ""
+    assert store.get("does:not-exist") == ""
+
+
+def test_unusable_tafseer_db_raises_sqlite_error_not_something_exotic(tmp_path):
+    """api.py degrades on sqlite3.Error; anything else would escape and crash
+    the process at import."""
+    empty = tmp_path / "empty.sqlite3"
+    empty.touch()
+    with pytest.raises(sqlite3.Error):
+        TafseerStore(empty)
+
+    garbage = tmp_path / "garbage.sqlite3"
+    garbage.write_text("this is definitely not a database")
+    with pytest.raises(sqlite3.Error):
+        TafseerStore(garbage)
+
+
+def test_render_blueprint_does_not_pin_container_paths():
+    """A blueprint env var overrides the image's ENV, so a stale path here
+    crash-loops the container at import. The image already sets these."""
+    blueprint = (Path(__file__).resolve().parents[1] / "render.yaml").read_text()
+    for var in ("QURAN_DATA_PATH", "EMBEDDINGS_PATH", "TAFSEER_DB"):
+        assert f"key: {var}" not in blueprint, (
+            f"{var} is pinned in render.yaml; it would override the image's "
+            f"correct value and can silently go stale")

@@ -38,6 +38,11 @@ def main() -> int:
         con.commit()
         con.execute("VACUUM")          # compact before shipping in the image
         con.close()
+        # mkstemp creates 0600 and os.replace preserves the mode, so without
+        # this the database is unreadable by anyone but its creator. In the
+        # image it is built as root and served as uid 1000, which would make
+        # the app fail to open it at startup.
+        os.chmod(tmp, 0o644)
         os.replace(tmp, dest)          # atomic: never leave a half-written db
     except BaseException:
         os.unlink(tmp)

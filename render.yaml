@@ -13,12 +13,19 @@ services:
     # never make the platform restart a container that is actually fine
     healthCheckPath: /healthz
     envVars:
-      - key: QURAN_DATA_PATH
-        value: /home/user/app/data/quran_full.jsonl
-      - key: EMBEDDINGS_PATH
-        value: /home/user/app/data/embeddings.npz
-      # PORT is intentionally not set here — Render injects its own and the
-      # container binds to ${PORT}, falling back to 7860 elsewhere.
+      # Data paths are deliberately NOT set here. The image already declares
+      # correct absolute paths in its ENV block, and a blueprint value overrides
+      # the image's — so a stale path here silently crashes the container at
+      # import (this happened: these pointed at a previous WORKDIR).
+      #
+      # PORT is likewise left to Render, which injects its own; the container
+      # binds ${PORT} and falls back to 7860 elsewhere.
+      #
+      # Pin CORS to the site's own origin so an arbitrary page cannot drive the
+      # API against this deployment's key from a visitor's browser. Render
+      # prompts for it; use the service URL, e.g. https://<name>.onrender.com
+      - key: ALLOWED_ORIGINS
+        sync: false
       # set these in the Render dashboard (or when prompted on first deploy)
       - key: NVIDIA_API_KEY
         sync: false

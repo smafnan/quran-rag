@@ -7,6 +7,7 @@ Run:  uvicorn api:app --reload  →  http://localhost:8000
 from __future__ import annotations
 
 import os
+import sqlite3
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -40,7 +41,16 @@ _data_path = os.environ.get("QURAN_DATA_PATH", str(_default_corpus))
 # RAM saved) and read it per verse on demand. Falls back to the JSONL's inline
 # tafseer when it is absent, so a plain clone still works.
 _tafseer_db = Path(os.environ.get("TAFSEER_DB", str(ROOT / "data" / "tafseer.sqlite3")))
-_tafseer_store = TafseerStore(_tafseer_db) if _tafseer_db.exists() else None
+_tafseer_store = None
+if _tafseer_db.exists():
+    # Existence is not usability: a truncated, unreadable or half-written file
+    # would otherwise raise at import, before uvicorn binds — so the container
+    # would crash-loop instead of serving, and /healthz could never report it.
+    try:
+        _tafseer_store = TafseerStore(_tafseer_db)
+    except sqlite3.Error as e:
+        print(f"warning: {_tafseer_db} is unusable ({e}) — falling back to "
+              f"tafseer inlined in the corpus", file=sys.stderr)
 _passages = load_corpus(_data_path, load_tafseer=_tafseer_store is None)
 
 # Semantic layer: needs the offline index (scripts/build_embeddings.py) plus a
@@ -94,7 +104,18 @@ def _has_tafseer(passage) -> bool:
 
 
 def _tafseer_for(passage) -> str:
-    return _tafseer_store.get(passage.ref) if _tafseer_store else passage.tafseer
+    """Commentary for a verse, or "" if the store is unreadable.
+
+    A disk error must not fail the whole request: the verse, its translation and
+    the Arabic are already in memory and remain worth serving, and /api/explain
+    handles missing tafseer honestly rather than inventing any."""
+    if _tafseer_store is None:
+        return passage.tafseer
+    try:
+        return _tafseer_store.get(passage.ref)
+    except sqlite3.Error as e:
+        print(f"warning: tafseer lookup failed for {passage.ref}: {e}", file=sys.stderr)
+        return ""
 
 
 def _enforce(limiter: RateLimiter, request: Request, what: str) -> None:
@@ -198,7 +219,7 @@ def explain(req: ExplainRequest, request: Request):
             detail="No LLM configured for explanations. Set NVIDIA_API_KEY or ANTHROPIC_API_KEY.",
         )
     if _tafseer_store is not None:
-        passage = replace(passage, tafseer=_tafseer_store.get(passage.ref))
+        passage = replace(passage, tafseer=_tafseer_for(passage))
     try:
         explanation = explain_passage(passage, req.question, _llm, SOURCE_NAME)
     except HTTPError as e:

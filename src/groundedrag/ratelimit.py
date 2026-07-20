@@ -11,6 +11,7 @@ deployment wants Redis (or the host's own edge rate limiting) instead.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections import defaultdict, deque
@@ -43,9 +44,32 @@ class RateLimiter:
             return True, 0
 
 
-def client_key(request) -> str:
-    """Best-effort client identity behind a proxy (Render/Fly set XFF)."""
+def client_key(request, trusted_hops: int | None = None) -> str:
+    """Client identity behind a reverse proxy.
+
+    Each proxy *appends* the address it received the request from, so in
+    ``X-Forwarded-For: a, b, c`` the rightmost entry was written by the last
+    proxy and the leftmost is whatever the original client claimed.
+
+    Reading the leftmost entry — the obvious-looking choice — lets a caller send
+    a different fabricated value on every request and get a fresh bucket each
+    time, which silently defeats the whole rate limit. So count back from the
+    right by the number of proxies actually in front of this app
+    (TRUSTED_PROXY_HOPS, default 1 for a single load balancer).
+    """
+    if trusted_hops is None:
+        try:
+            trusted_hops = int(os.environ.get("TRUSTED_PROXY_HOPS", "1"))
+        except ValueError:
+            trusted_hops = 1
+    peer = request.client.host if request.client else "unknown"
+    if trusted_hops <= 0:
+        return peer                      # no proxy: trust the socket, not headers
     xff = request.headers.get("x-forwarded-for", "")
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    if not xff:
+        return peer
+    parts = [p.strip() for p in xff.split(",") if p.strip()]
+    if not parts:
+        return peer
+    # index from the right; clamp so a short header can't reach a spoofed entry
+    return parts[max(0, len(parts) - trusted_hops)]
