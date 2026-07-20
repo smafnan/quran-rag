@@ -23,8 +23,12 @@ ROOT = Path(__file__).resolve().parent
 SOURCE_NAME = "the Quran"
 
 app = FastAPI(title="Quran RAG API", version="1.0.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
-                   allow_headers=["*"])
+# Open by default so a clone works anywhere. When the UI is hosted separately
+# (e.g. Netlify) set ALLOWED_ORIGINS to that origin so only it may spend the
+# deployment's API quota from a browser.
+_origins = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "*").split(",") if o.strip()]
+app.add_middleware(CORSMiddleware, allow_origins=_origins or ["*"],
+                   allow_methods=["*"], allow_headers=["*"])
 
 _default_corpus = ROOT / "data" / "quran_full.jsonl"
 if not _default_corpus.exists():

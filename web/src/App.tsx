@@ -13,7 +13,8 @@ type Result = {
   matched: string[];
   has_tafseer: boolean;
 };
-type Response = { found: boolean; source: string; count: number; results: Result[] };
+// named SearchResponse so it does not shadow the DOM's Response type
+type SearchResponse = { found: boolean; source: string; count: number; results: Result[] };
 type Explanation = { loading: boolean; text?: string; error?: string };
 type TafseerPanel = { loading: boolean; text?: string; error?: string };
 
@@ -26,6 +27,25 @@ const SAMPLES = [
 
 const PAGE = 25;
 const ARABIC_FONT = "'Amiri', 'Scheherazade New', 'Traditional Arabic', serif";
+
+// Empty when the API is served from the same origin (local dev, or the single
+// container on Render). Set VITE_API_URL at build time to point a statically
+// hosted frontend (Netlify, Pages) at a separately hosted backend.
+const API = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
+
+// A free-tier backend sleeps when idle and takes ~50s to wake, so give requests
+// room and tell the user what is happening instead of failing at the default.
+const WAKE_TIMEOUT_MS = 90_000;
+
+async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), WAKE_TIMEOUT_MS);
+  try {
+    return await fetch(`${API}${path}`, { ...init, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function refKey(ref: string): [number, number] {
   const [c, v] = ref.split(":").map(Number);
@@ -58,7 +78,7 @@ function MatchBadges({ matched }: { matched: string[] }) {
 export default function App() {
   const [q, setQ] = useState("");
   const [asked, setAsked] = useState("");
-  const [resp, setResp] = useState<Response | null>(null);
+  const [resp, setResp] = useState<SearchResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [count, setCount] = useState<number | null>(null);
   const [explainAvailable, setExplainAvailable] = useState(true);
@@ -67,10 +87,11 @@ export default function App() {
   const [sortBy, setSortBy] = useState<"relevance" | "quran">("relevance");
   const [visible, setVisible] = useState(PAGE);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [waking, setWaking] = useState(false);
   const reqSeq = useRef(0);
 
   useEffect(() => {
-    fetch("/api/info")
+    apiFetch("/api/info")
       .then((r) => r.json())
       .then((d) => {
         setCount(d.passages);
@@ -88,8 +109,13 @@ export default function App() {
     setExplanations({});
     setTafseers({});
     setVisible(PAGE);
+    // a sleeping free-tier backend takes ~50s to wake; say so rather than
+    // leaving a spinner that looks like the app has hung
+    const wakeHint = setTimeout(() => {
+      if (seq === reqSeq.current) setWaking(true);
+    }, 4000);
     try {
-      const r = await fetch("/api/ask", {
+      const r = await apiFetch("/api/ask", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question: text, mode: "all" }),
@@ -106,14 +132,21 @@ export default function App() {
       setSearchError(null);
       setResp(data);
       setAsked(text);
-    } catch {
+    } catch (e) {
       if (seq === reqSeq.current) {
-        setSearchError("Could not reach the search service.");
+        const aborted = (e as { name?: string })?.name === "AbortError";
+        setSearchError(aborted
+          ? "The server took too long to wake up. It sleeps when idle — try once more."
+          : "Could not reach the search service.");
         setResp(null);
         setAsked(text);
       }
     } finally {
-      if (seq === reqSeq.current) setLoading(false);
+      clearTimeout(wakeHint);
+      if (seq === reqSeq.current) {
+        setLoading(false);
+        setWaking(false);
+      }
     }
   }
 
@@ -129,7 +162,7 @@ export default function App() {
     }
     setTafseers((prev) => ({ ...prev, [ref]: { loading: true } }));
     try {
-      const r = await fetch(`/api/tafseer?ref=${encodeURIComponent(ref)}`);
+      const r = await apiFetch(`/api/tafseer?ref=${encodeURIComponent(ref)}`);
       if (!r.ok) throw new Error(`${r.status}`);
       const d = await r.json();
       setTafseers((prev) => ({
@@ -159,7 +192,7 @@ export default function App() {
     }
     setExplanations((prev) => ({ ...prev, [ref]: { loading: true } }));
     try {
-      const r = await fetch("/api/explain", {
+      const r = await apiFetch("/api/explain", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ref, question: asked }),
@@ -258,6 +291,18 @@ export default function App() {
             </button>
           ))}
         </div>
+
+        {/* Cold-start notice */}
+        {waking && loading && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            className="mt-6 flex items-center justify-center gap-2 rounded-xl border border-amber-300/20 bg-amber-300/5 px-4 py-3 text-sm text-amber-100/80"
+          >
+            <Loader2 className="animate-spin" size={15} />
+            Waking the server — it sleeps when idle, so this first search can take up to a minute.
+          </motion.div>
+        )}
 
         {/* Search error (rate limit, upstream failure) */}
         {searchError && (

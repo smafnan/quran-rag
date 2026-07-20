@@ -1,0 +1,45 @@
+# Keeps the free-tier backend awake so a shared link responds immediately.
+#
+# Render free instances sleep after ~15 minutes idle and take ~50s to wake. This
+# pings the cheapest endpoint (/api/info reads memory only — no model calls, so
+# it costs no API quota) often enough to prevent that.
+#
+# Two things worth knowing:
+#  * Render's free tier allows 750 instance-hours per month. A month is ~730
+#    hours, so keeping ONE service awake around the clock fits — but it consumes
+#    nearly the whole allowance. A second always-on free service will not fit.
+#  * GitHub disables scheduled workflows after 60 days without repo activity,
+#    and cron runs can be delayed when Actions is busy. For a link you rely on,
+#    an uptime monitor (or Render's paid tier, which never sleeps) is sturdier.
+name: keepalive
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every 10 minutes
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping the backend
+        env:
+          URL: ${{ vars.BACKEND_URL }}
+        run: |
+          if [ -z "$URL" ]; then
+            echo "BACKEND_URL repository variable is not set — nothing to ping."
+            echo "Set it under Settings > Secrets and variables > Actions > Variables."
+            exit 0
+          fi
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 90 "$URL/api/info" || echo 000)
+          echo "GET $URL/api/info -> $code"
+          # a sleeping instance may not answer the very first probe; retry once
+          if [ "$code" != "200" ]; then
+            sleep 20
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 90 "$URL/api/info" || echo 000)
+            echo "retry -> $code"
+          fi
+          [ "$code" = "200" ]

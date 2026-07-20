@@ -1,0 +1,35 @@
+# Netlify hosts the built React UI; the Python API stays on Render.
+#
+# Netlify cannot run this backend (its Functions are JS/TS/Go only), and a plain
+# proxy rewrite is not a fix either: Netlify's edge gives up around 30s while a
+# sleeping free-tier Render instance needs ~50s to wake, so the site would error
+# exactly when someone opens it after a quiet spell. Serving the UI statically
+# means the page always loads instantly and only the data call waits.
+#
+# Set VITE_API_URL in the Netlify UI (Site settings -> Environment variables) to
+# the Render URL, e.g. https://quran-rag-kc6e.onrender.com
+
+[build]
+  base = "web"
+  command = "npm ci && npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+# SPA fallback so refreshing a deep link still serves the app
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
