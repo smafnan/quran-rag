@@ -15,8 +15,8 @@ services:
         value: /home/user/app/data/quran_full.jsonl
       - key: EMBEDDINGS_PATH
         value: /home/user/app/data/embeddings.npz
-      - key: PORT
-        value: "7860"
+      # PORT is intentionally not set here — Render injects its own and the
+      # container binds to ${PORT}, falling back to 7860 elsewhere.
       # set these in the Render dashboard (or when prompted on first deploy)
       - key: NVIDIA_API_KEY
         sync: false
