@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 import sys
 import time
 from pathlib import Path
@@ -324,3 +325,83 @@ def test_render_blueprint_does_not_pin_container_paths():
         assert f"key: {var}" not in blueprint, (
             f"{var} is pinned in render.yaml; it would override the image's "
             f"correct value and can silently go stale")
+
+
+# ------------------------------------------------------- query understanding
+
+from groundedrag import QueryUnderstanding, translit_key
+from groundedrag.corpus import Passage as _P
+
+
+@pytest.fixture(scope="module")
+def understanding():
+    # a vocabulary shaped like the real corpus: it spells names one way only
+    vocab = collections.Counter({
+        "musa": 143, "ibrahim": 74, "isa": 26, "maryam": 34, "yusuf": 28,
+        "dawood": 17, "haroun": 18, "salat": 93, "prayer": 5, "noah": 39,
+        "nuh": 4, "patience": 89, "forgiveness": 104, "mercy": 120,
+        "heart": 60, "belief": 40, "receive": 20, "separate": 5, "purer": 6,
+    })
+    return QueryUnderstanding(vocab)
+
+
+@pytest.mark.parametrize("typed,expected", [
+    ("moses", "musa"), ("abraham", "ibrahim"), ("jesus", "isa"),
+    ("mary", "maryam"), ("joseph", "yusuf"), ("david", "dawood"),
+    ("aaron", "haroun"), ("prayer", "salat"),
+])
+def test_anglicised_names_reach_the_corpus_spelling(understanding, typed, expected):
+    """The corpus spells these one way; a reader may well type the other. Getting
+    this wrong makes the app claim the Quran is silent on Moses."""
+    i = understanding.analyse(typed)
+    reached = {v for _, vs in i.expanded for v in vs} | {i.effective}
+    assert expected in reached, f"{typed!r} never reached {expected!r}: {i.as_dict()}"
+
+
+@pytest.mark.parametrize("typo,fixed", [
+    ("paitence", "patience"), ("forgivness", "forgiveness"),
+    ("mercyy", "mercy"), ("haert", "heart"), ("beleif", "belief"),
+    ("recieve", "receive"), ("seperate", "separate"),
+])
+def test_typos_are_corrected(understanding, typo, fixed):
+    assert understanding.analyse(typo).effective == fixed
+
+
+def test_transliteration_key_groups_spelling_variants():
+    for a, b in [("musa", "moosa"), ("dawud", "dawood"), ("yaqoub", "yaqoob"),
+                 ("mohammed", "muhammad"), ("zulqarnayn", "zulqarnain")]:
+        assert translit_key(a) == translit_key(b), f"{a}/{b} should share a key"
+
+
+def test_transliteration_key_keeps_different_words_apart():
+    for a, b in [("musa", "isa"), ("patience", "prayer"), ("noah", "nuh_x")]:
+        assert translit_key(a) != translit_key(b)
+
+
+def test_correct_queries_are_never_rewritten(understanding):
+    for q in ["patience", "mercy", "forgiveness", "musa", "the mercy of Allah"]:
+        assert understanding.analyse(q).corrections == [], q
+
+
+def test_unknown_word_with_no_close_match_is_left_alone(understanding):
+    """Inventing a correction would be worse than admitting nothing matched."""
+    i = understanding.analyse("zzzqqxyw")
+    assert i.corrections == [] and i.effective == "zzzqqxyw"
+
+
+def test_synonyms_are_matched_as_alternatives_not_extra_requirements():
+    """A verse spelling it 'musa' must match a search for 'moses' without also
+    having to contain 'moses' — otherwise expansion would destroy recall."""
+    verses = [_P("20:9", "And has the story of Musa reached you"),
+              _P("2:1", "Alif Lam Meem")]
+    qu = QueryUnderstanding(collections.Counter({"musa": 1, "story": 1}))
+    r = Retriever(verses, synonyms=qu.synonym_map())
+    assert {h.passage.ref for h in r.search("moses", mode="all")} == {"20:9"}
+
+
+def test_ambiguous_input_asks_instead_of_guessing():
+    """Two equally plausible readings must produce a question, not a silent pick."""
+    qu = QueryUnderstanding(collections.Counter({"bear": 10, "bead": 10, "beat": 10}))
+    i = qu.analyse("beax")
+    assert i.needs_confirmation and len(i.suggestions) >= 2
+    assert i.corrections == []      # nothing was assumed on the reader's behalf

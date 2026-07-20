@@ -176,10 +176,17 @@ class Retriever:
     def __init__(self, passages: list[Passage],
                  embeddings_path: str | Path | None = None,
                  embed_query: Callable[[str], list[float]] | None = None,
-                 semantic_threshold: float = SEMANTIC_THRESHOLD_DEFAULT) -> None:
+                 semantic_threshold: float = SEMANTIC_THRESHOLD_DEFAULT,
+                 synonyms: dict[str, frozenset[str]] | None = None) -> None:
         self.passages = passages
         self.embed_query = embed_query
         self.semantic_threshold = semantic_threshold
+        # equivalent terms are matched as alternatives, not as extra required
+        # words: searching "Noah" should find verses spelling it "nuh" without
+        # penalising those that do not also contain "noah"
+        self._synonym_stems: dict[str, frozenset[str]] = {}
+        for term, group in (synonyms or {}).items():
+            self._synonym_stems[_stem(term)] = frozenset(_stem(t) for t in group)
 
         self._vec = TfidfVectorizer(lowercase=True, stop_words="english",
                                     ngram_range=(1, 2), sublinear_tf=True)
@@ -251,10 +258,11 @@ class Retriever:
         except Exception:
             return None
 
-    def _query_terms(self, query: str) -> tuple[list[str], list[frozenset[str]]]:
-        """(english stems, arabic terms as alternative-spelling sets)."""
-        stems = [_stem(w) for w in _tokens(query)
-                 if len(w) >= 3 and w not in ENGLISH_STOP_WORDS]
+    def _query_terms(self, query: str) -> tuple[list[frozenset[str]], list[frozenset[str]]]:
+        """(english stems, arabic terms) — each as a set of equivalent forms."""
+        stems = [self._synonym_stems.get(s, frozenset({s}))
+                 for s in (_stem(w) for w in _tokens(query)
+                           if len(w) >= 3 and w not in ENGLISH_STOP_WORDS)]
         arabic: list[frozenset[str]] = []
         if _ARABIC_CHAR_RE.search(query):
             # position i of each reading is the same source word, so zipping the
@@ -270,7 +278,7 @@ class Retriever:
                         arabic.append(frozenset(a for a in alts if a))
         return stems, arabic
 
-    def _keyword_fractions(self, stems: list[str],
+    def _keyword_fractions(self, stems: list[frozenset[str]],
                            arabic: list[frozenset[str]]) -> np.ndarray:
         """Per passage: fraction of the query's content terms present in it."""
         n_terms = len(stems) + len(arabic)
@@ -282,7 +290,7 @@ class Retriever:
             hits = 0
             if stems:
                 passage_stems = self._stem_sets[i]
-                hits += sum(1 for s in stems if s in passage_stems)
+                hits += sum(1 for alts in stems if alts & passage_stems)
             if arabic:
                 passage_tokens = self._arabic_tokens[i]
                 hits += sum(1 for alts in arabic if alts & passage_tokens)

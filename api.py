@@ -6,7 +6,9 @@ Run:  uvicorn api:app --reload  →  http://localhost:8000
 
 from __future__ import annotations
 
+import collections
 import os
+import re
 import sqlite3
 import sys
 from dataclasses import replace
@@ -18,11 +20,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from src.groundedrag import (NvidiaEmbedder, RateLimiter, Retriever, TafseerStore,
-                             client_key, explain_passage, get_llm, load_corpus)
+from src.groundedrag import (NvidiaEmbedder, QueryUnderstanding, RateLimiter,
+                             Retriever, TafseerStore, client_key,
+                             explain_passage, get_llm, load_corpus)
 
 ROOT = Path(__file__).resolve().parent
 SOURCE_NAME = "the Quran"
+_WORD_RE = re.compile(r"[a-z']+")
+
+
+def _corpus_vocabulary(passages):
+    """Word frequencies over the translation, so spelling suggestions can only
+    ever point at words this corpus actually contains."""
+    return collections.Counter(
+        w for p in passages for w in _WORD_RE.findall(p.text.lower()))
 
 app = FastAPI(title="Quran RAG API", version="1.0.0")
 # Open by default so a clone works anywhere. When the UI is hosted separately
@@ -60,8 +71,15 @@ _embed_key = os.environ.get("NVIDIA_EMBED_API_KEY") or os.environ.get("NVIDIA_AP
 _embeddings_path = os.environ.get("EMBEDDINGS_PATH", str(ROOT / "data" / "embeddings.npz"))
 _embedder = NvidiaEmbedder(_embed_key) if _embed_key else None
 
+# Readers spell transliterated names however they learned them ("Moses" for
+# Musa, "Mohammed" for Muhammad) and make ordinary typos. Without this the app
+# answers "not addressed in the Quran" for topics it covers at length, which is
+# the most misleading thing it could say.
+_understanding = QueryUnderstanding(_corpus_vocabulary(_passages))
+
 _retriever = Retriever(_passages, embeddings_path=_embeddings_path,
-                       embed_query=_embedder)
+                       embed_query=_embedder,
+                       synonyms=_understanding.synonym_map())
 _passage_by_ref = {p.ref: p for p in _passages}
 
 # The "explain" endpoint needs a real text-generation LLM (not the retriever).
@@ -132,6 +150,7 @@ class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     k: int = Field(default=5, ge=1, le=100)
     mode: str = "top"  # "top" = best k results; "all" = every occurrence corpus-wide
+    exact: bool = False  # search exactly what was typed; never correct spelling
 
 
 class ExplainRequest(BaseModel):
@@ -175,11 +194,41 @@ def ask(req: AskRequest, request: Request):
     if _embedder is not None and _retriever._sem_matrix is not None:
         _enforce(_ask_limiter, request, "search")
     mode = req.mode if req.mode in ("top", "all") else "top"
+
+    interpretation = _understanding.analyse(req.question)
+    # Search what the reader typed first. Their spelling is only second-guessed
+    # when it finds nothing — a query that already works is never rewritten.
     hits = _retriever.search(req.question, top_k=req.k, mode=mode)
+    applied_correction = False
+    if not hits and interpretation.changed and not req.exact:
+        corrected = _retriever.search(interpretation.effective, top_k=req.k, mode=mode)
+        if corrected:
+            hits, applied_correction = corrected, True
+
+    # Nothing found and more than one plausible reading: offer the choice rather
+    # than guessing, and rather than implying the Quran is silent on the topic.
+    if not hits and interpretation.needs_confirmation and not req.exact:
+        return {
+            "found": False,
+            "source": SOURCE_NAME,
+            "count": 0,
+            "results": [],
+            "needs_confirmation": True,
+            "suggestions": interpretation.suggestions,
+            "interpretation": interpretation.as_dict(),
+        }
+
     return {
         "found": bool(hits),
         "source": SOURCE_NAME,
         "count": len(hits),
+        "needs_confirmation": False,
+        "interpretation": {
+            **interpretation.as_dict(),
+            # only claim a correction was used if it actually produced the results
+            "corrections": interpretation.as_dict()["corrections"] if applied_correction else [],
+            "effective": interpretation.effective if applied_correction else req.question,
+        },
         "results": [
             {
                 "ref": h.passage.ref,

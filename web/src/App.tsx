@@ -14,7 +14,18 @@ type Result = {
   has_tafseer: boolean;
 };
 // named SearchResponse so it does not shadow the DOM's Response type
-type SearchResponse = { found: boolean; source: string; count: number; results: Result[] };
+type Correction = { from: string; to: string };
+type Expansion = { term: string; also_searched: string[] };
+type Interpretation = {
+  original: string; effective: string;
+  corrections: Correction[]; expanded: Expansion[];
+  suggestions: string[]; needs_confirmation: boolean;
+};
+type SearchResponse = {
+  found: boolean; source: string; count: number; results: Result[];
+  needs_confirmation?: boolean; suggestions?: string[];
+  interpretation?: Interpretation;
+};
 type Explanation = { loading: boolean; text?: string; error?: string };
 type TafseerPanel = { loading: boolean; text?: string; error?: string };
 
@@ -100,7 +111,12 @@ export default function App() {
       .catch(() => {});
   }, []);
 
-  async function ask(question?: string) {
+  /** Search the literal text, overriding any spelling correction. */
+  async function askExact(question: string) {
+    return ask(question, true);
+  }
+
+  async function ask(question?: string, exact = false) {
     const text = (question ?? q).trim();
     if (!text || loading) return;
     const seq = ++reqSeq.current;
@@ -118,7 +134,7 @@ export default function App() {
       const r = await apiFetch("/api/ask", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: text, mode: "all" }),
+        body: JSON.stringify({ question: text, mode: "all", exact }),
       });
       const data = await r.json();
       if (seq !== reqSeq.current) return; // a newer search superseded this one
@@ -291,6 +307,68 @@ export default function App() {
             </button>
           ))}
         </div>
+
+        {/* What the system understood — always shown when it acted on the query,
+            so a reader can see and undo the interpretation rather than wonder
+            why the results do not match what they typed. */}
+        {resp?.interpretation && !resp.needs_confirmation &&
+         (resp.interpretation.corrections.length > 0 ||
+          resp.interpretation.expanded.length > 0) && (
+          <div className="mt-6 rounded-xl border border-teal-300/20 bg-teal-300/5 px-4 py-3 text-sm">
+            {resp.interpretation.corrections.length > 0 ? (
+              <p className="text-teal-100/90">
+                Showing results for{" "}
+                <strong className="text-white">{resp.interpretation.effective}</strong>.{" "}
+                <button
+                  onClick={() => askExact(resp.interpretation!.original)}
+                  className="underline decoration-dotted underline-offset-2 hover:text-white"
+                >
+                  Search instead for “{resp.interpretation.original}”
+                </button>
+              </p>
+            ) : (
+              <p className="text-teal-100/80">
+                Also searched{" "}
+                {resp.interpretation.expanded
+                  .flatMap((e) => e.also_searched)
+                  .map((t, i, arr) => (
+                    <span key={t}>
+                      <strong className="text-white">{t}</strong>
+                      {i < arr.length - 1 ? ", " : ""}
+                    </span>
+                  ))}{" "}
+                — the same name is spelled differently across translations.
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* Genuinely ambiguous: ask rather than guess */}
+        {resp?.needs_confirmation && (resp.suggestions?.length ?? 0) > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="mt-9 rounded-2xl border border-amber-400/25 bg-amber-400/5 p-6"
+          >
+            <p className="text-amber-100/90">
+              No verses matched “{asked}”. Did you mean:
+            </p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {resp.suggestions!.map((s) => (
+                <button
+                  key={s}
+                  onClick={() => ask(s)}
+                  className="rounded-lg border border-amber-300/25 bg-amber-300/10 px-3 py-1.5 text-sm text-amber-100 hover:bg-amber-300/20"
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+            <p className="mt-3 text-xs text-amber-200/50">
+              Picking one searches it; nothing has been assumed on your behalf.
+            </p>
+          </motion.div>
+        )}
 
         {/* Cold-start notice */}
         {waking && loading && (
