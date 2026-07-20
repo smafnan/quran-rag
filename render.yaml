@@ -1,0 +1,24 @@
+# Render Blueprint — deploys the API and the built UI as one Docker service.
+# Render reads this automatically when you create a Blueprint from this repo.
+#
+# The two NVIDIA keys are marked sync:false, so Render prompts for them at
+# deploy time and stores them as secrets. They are never committed here.
+services:
+  - type: web
+    name: quran-rag
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /api/info
+    envVars:
+      - key: QURAN_DATA_PATH
+        value: /home/user/app/data/quran_full.jsonl
+      - key: EMBEDDINGS_PATH
+        value: /home/user/app/data/embeddings.npz
+      - key: PORT
+        value: "7860"
+      # set these in the Render dashboard (or when prompted on first deploy)
+      - key: NVIDIA_API_KEY
+        sync: false
+      - key: NVIDIA_EMBED_API_KEY
+        sync: false
