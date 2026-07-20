@@ -66,6 +66,7 @@ export default function App() {
   const [tafseers, setTafseers] = useState<Record<string, TafseerPanel>>({});
   const [sortBy, setSortBy] = useState<"relevance" | "quran">("relevance");
   const [visible, setVisible] = useState(PAGE);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const reqSeq = useRef(0);
 
   useEffect(() => {
@@ -95,11 +96,20 @@ export default function App() {
       });
       const data = await r.json();
       if (seq !== reqSeq.current) return; // a newer search superseded this one
+      if (!r.ok) {
+        // a rate limit or upstream error must not read as "no verses found"
+        setSearchError(data?.detail || `Search failed (${r.status})`);
+        setResp(null);
+        setAsked(text);
+        return;
+      }
+      setSearchError(null);
       setResp(data);
       setAsked(text);
     } catch {
       if (seq === reqSeq.current) {
-        setResp({ found: false, source: "the Quran", count: 0, results: [] });
+        setSearchError("Could not reach the search service.");
+        setResp(null);
         setAsked(text);
       }
     } finally {
@@ -248,6 +258,20 @@ export default function App() {
             </button>
           ))}
         </div>
+
+        {/* Search error (rate limit, upstream failure) */}
+        {searchError && (
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="mt-9 rounded-2xl border border-rose-400/25 bg-rose-400/5 p-6 text-center"
+          >
+            <p className="text-rose-100/90">{searchError}</p>
+            <p className="mt-2 text-sm text-rose-200/50">
+              This is a limit or a connection problem — not a statement about the text.
+            </p>
+          </motion.div>
+        )}
 
         {/* Results */}
         <AnimatePresence mode="wait">

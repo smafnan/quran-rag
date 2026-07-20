@@ -11,12 +11,13 @@ import sys
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from src.groundedrag import NvidiaEmbedder, Retriever, explain_passage, get_llm, load_corpus
+from src.groundedrag import (NvidiaEmbedder, RateLimiter, Retriever, client_key,
+                             explain_passage, get_llm, load_corpus)
 
 ROOT = Path(__file__).resolve().parent
 SOURCE_NAME = "the Quran"
@@ -71,6 +72,22 @@ if _explain_provider:
                   f"({e}) — explanations disabled", file=sys.stderr)
 
 
+# Both paid paths are capped per client. A public deployment otherwise hands the
+# deployer's API quota to anyone with the URL. Set the limit to 0 to disable.
+_ask_limiter = RateLimiter(int(os.environ.get("ASK_RATE_LIMIT", "60")), 300)
+_explain_limiter = RateLimiter(int(os.environ.get("EXPLAIN_RATE_LIMIT", "15")), 3600)
+
+
+def _enforce(limiter: RateLimiter, request: Request, what: str) -> None:
+    allowed, retry_after = limiter.check(client_key(request))
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit reached for {what}. Try again in {retry_after}s.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+
 class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     k: int = Field(default=5, ge=1, le=100)
@@ -93,7 +110,10 @@ def info():
 
 
 @app.post("/api/ask")
-def ask(req: AskRequest):
+def ask(req: AskRequest, request: Request):
+    # only the semantic layer costs an API call; lexical-only search is free
+    if _embedder is not None and _retriever._sem_matrix is not None:
+        _enforce(_ask_limiter, request, "search")
     mode = req.mode if req.mode in ("top", "all") else "top"
     hits = _retriever.search(req.question, top_k=req.k, mode=mode)
     return {
@@ -128,10 +148,11 @@ def tafseer(ref: str):
 
 
 @app.post("/api/explain")
-def explain(req: ExplainRequest):
+def explain(req: ExplainRequest, request: Request):
     passage = _passage_by_ref.get(req.ref)
     if passage is None:
         raise HTTPException(status_code=404, detail=f"No passage found for ref '{req.ref}'.")
+    _enforce(_explain_limiter, request, "AI explanations")
     if _llm is None:
         raise HTTPException(
             status_code=503,

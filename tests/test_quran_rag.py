@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -202,3 +203,39 @@ def test_tfidf_matrix_stays_sparse(passages):
     """Densifying costs ~0.9 GB on the full corpus for identical math."""
     from scipy.sparse import issparse
     assert issparse(Retriever(passages)._matrix)
+
+
+# ------------------------------------------------------------- rate limiting
+
+from groundedrag import RateLimiter
+
+
+def test_rate_limiter_blocks_past_the_limit():
+    rl = RateLimiter(3, 60)
+    assert [rl.check("a")[0] for _ in range(5)] == [True, True, True, False, False]
+
+
+def test_rate_limiter_is_per_client():
+    rl = RateLimiter(1, 60)
+    assert rl.check("a")[0] and rl.check("b")[0]
+    assert not rl.check("a")[0]
+
+
+def test_rate_limiter_reports_retry_after():
+    rl = RateLimiter(1, 60)
+    rl.check("a")
+    allowed, retry_after = rl.check("a")
+    assert not allowed and 0 < retry_after <= 61
+
+
+def test_rate_limiter_window_expires():
+    rl = RateLimiter(1, 0.05)
+    assert rl.check("a")[0]
+    assert not rl.check("a")[0]
+    time.sleep(0.06)
+    assert rl.check("a")[0]
+
+
+def test_rate_limit_of_zero_disables():
+    rl = RateLimiter(0, 60)
+    assert all(rl.check("a")[0] for _ in range(20))
