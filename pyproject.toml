@@ -14,7 +14,9 @@ dependencies = ["scikit-learn>=1.3", "numpy>=1.24"]
 
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.40"]
+nvidia = ["certifi>=2024.2.2"]
 web = ["fastapi>=0.110", "uvicorn[standard]>=0.27"]
+pipeline = ["pdfplumber>=0.11", "certifi>=2024.2.2"]  # scripts/: PDF extraction + embeddings build
 dev = ["pytest>=7.4"]
 
 [tool.setuptools.packages.find]

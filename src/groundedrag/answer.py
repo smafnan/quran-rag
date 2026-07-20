@@ -67,3 +67,37 @@ class GroundedAnswerer:
         # Default: return the passages themselves with citations.
         text = "\n\n".join(f"[{p.ref}] {p.text}" for p in passages)
         return Answer(found=True, text=text, citations=passages)
+
+
+TAFSEER_CHAR_BUDGET = 12000
+
+
+def _explain_system(source_name: str) -> str:
+    return (
+        f"You are a knowledgeable guide explaining a single verse from {source_name} "
+        f"using its accompanying tafseer (commentary and hadith). You are given the "
+        f"verse's translation, its citation, the tafseer text, and the question the "
+        f"reader was originally exploring. Write a clear, well-organized explanation "
+        f"that:\n"
+        f"- opens with the verse's core meaning in plain terms\n"
+        f"- draws out the deeper meaning, context, and connections the tafseer offers\n"
+        f"- calls out cross-references to other verses or hadith mentioned in the "
+        f"tafseer, citing them like [2:255]\n"
+        f"- relates the explanation back to what the reader was asking about, if given\n"
+        f"Use ONLY the tafseer text provided — do not invent hadith, sources, or claims "
+        f"not present in it. If the tafseer is thin or absent, say so honestly rather "
+        f"than filling gaps from outside knowledge."
+    )
+
+
+def explain_passage(passage: Passage, question: str, llm: LLM, source_name: str) -> str:
+    """Deep-dive explanation of a single passage using its tafseer, via LLM."""
+    tafseer = passage.tafseer[:TAFSEER_CHAR_BUDGET]
+    truncated_note = ("\n\n[tafseer truncated for length]"
+                       if len(passage.tafseer) > TAFSEER_CHAR_BUDGET else "")
+    user = (
+        f"Verse [{passage.ref}]: {passage.text}\n\n"
+        f"Tafseer:\n{tafseer or '(no tafseer available for this verse)'}{truncated_note}\n\n"
+        f"Reader's original question: {question or '(none given)'}"
+    )
+    return llm.complete(_explain_system(source_name), user, max_tokens=1200)

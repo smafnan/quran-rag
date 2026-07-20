@@ -9,35 +9,39 @@ Answers questions strictly and only from the Quran, always with `[chapter:verse]
 
 ## What it does
 
-Given a question, the system retrieves the most relevant verses from a corpus using TF-IDF + cosine similarity, then either:
+Enter a topic and the system finds **every verse connected to it across the whole corpus** — shown in Arabic and English with `[chapter:verse]` citations, the tafseer one click away. Search is hybrid, three layers deep:
 
-- **returns the verses verbatim** with their `[chapter:verse]` citations (default, no LLM needed — by construction this is only the book's words), or
-- **composes a prose answer** from those verses using an LLM, under a system prompt that forbids outside knowledge and requires a citation for every statement (`--compose`, optional).
+- **keyword** — morphological word matching over the translation (and diacritic-insensitive matching over the Arabic for Arabic-script queries); this is what makes "every occurrence" exhaustive — a verse that literally contains the topic word is always found
+- **TF-IDF** — 1-2 gram cosine similarity, offline, no downloads
+- **semantic** *(optional)* — an NVIDIA embedding index over all verses catches conceptually-related verses that share no vocabulary with the query
 
-A relevance gate sits in front of both modes: if no verse clears a similarity threshold, the system says the topic isn't addressed instead of forcing a weak match or inventing an answer. The test suite (`tests/test_quran_rag.py`) directly asserts this guarantee — citations must be verbatim substrings of the corpus, and off-topic questions must be declined.
+Two retrieval modes: `top` (best k hits, the default for the CLI) and `all` (every hit corpus-wide, what the web UI uses). Answers are then either the **verses verbatim** (default, no LLM needed) or an **LLM-composed prose answer** under a strict grounding prompt (`--compose`).
 
-The repo ships with a **10-verse sample corpus** (`data/quran_sample.jsonl`) so it runs out of the box; see [Add the full text](#add-the-full-text) to use it for real.
+A relevance gate sits in front of everything: if no verse clears any layer's threshold, the system says the topic isn't addressed instead of forcing a weak match or inventing an answer. The test suite (`tests/test_quran_rag.py`) directly asserts this guarantee — citations must be verbatim substrings of the corpus, and off-topic questions must be declined.
+
+The repo ships with a **10-verse sample corpus** (`data/quran_sample.jsonl`) so it runs out of the box, plus a full 6,191-verse corpus with Arabic and tafseer (`data/quran_full.jsonl`); see [Add the full text](#add-the-full-text).
 
 ## Architecture
 
 ```mermaid
 flowchart TD
-    A["data/*.jsonl<br/>{ref, text} per line"] --> B["corpus.load_corpus()<br/>list[Passage]"]
-    B --> C["retriever.Retriever<br/>TF-IDF (1-2 grams) + cosine similarity<br/>in-memory, fit once at startup"]
-    C -->|".search(query, top_k, min_score)"| D{"Any hit clears<br/>the relevance gate?"}
+    A["data/*.jsonl<br/>{ref, text, arabic?, tafseer?} per line"] --> B["corpus.load_corpus()<br/>list[Passage]"]
+    A2["data/embeddings.npz<br/>(scripts/build_embeddings.py, optional)"] --> C
+    B --> C["retriever.Retriever — hybrid<br/>keyword (morphological + Arabic) ∪ TF-IDF ∪ semantic"]
+    C -->|".search(query, mode=top|all)"| D{"Any hit clears<br/>the relevance gate?"}
     D -- no --> E["Answer(found=False)<br/>'not addressed in the Quran'"]
-    D -- yes --> F["passages mode (default)<br/>verbatim verses + citations"]
+    D -- yes --> F["passages / all-occurrences<br/>verbatim verses + citations"]
     D -- yes --> G["compose mode (--compose)<br/>providers.LLM.complete()<br/>grounding prompt: cite every claim,<br/>no outside knowledge"]
-    F --> H["ask.py (CLI)"]
-    F --> I["api.py — POST /api/ask"]
+    F --> H["ask.py (CLI, --all)"]
+    F --> I["api.py — POST /api/ask<br/>GET /api/tafseer · POST /api/explain"]
     G --> H
     G --> I
-    I --> J["web/dist (React + Tailwind SPA)<br/>served as static files at /"]
+    I --> J["web/dist (React + Tailwind SPA)<br/>Arabic RTL + tafseer + AI explain"]
 ```
 
-`providers.py` supplies two LLM backends behind a common interface: `MockLLM` (deterministic, used by tests — no network) and `AnthropicLLM` (real API call, default model `claude-opus-4-8`). Neither the retriever nor the answerer knows which one it's talking to.
+`providers.py` supplies the LLM backends behind a common interface — `MockLLM` (deterministic, used by tests — no network), `AnthropicLLM`, and `NvidiaLLM` (NIM chat completions) — plus `NvidiaEmbedder` for query-time embeddings. Neither the retriever nor the answerer knows which one it's talking to.
 
-There's no persisted vector index or database — the TF-IDF matrix is rebuilt from the JSONL file in-memory each time a process starts (CLI invocation or API startup). That's a deliberate tradeoff for a small, offline, dependency-light corpus; it would need revisiting for a full-length translation (6,000+ verses) served at scale.
+The TF-IDF matrix is rebuilt in-memory at startup; the semantic index is persisted (`data/embeddings.npz`, built once by `scripts/build_embeddings.py`) and loaded if its refs align 1:1 with the corpus — if the corpus changes, rebuild the index or the semantic layer silently disables itself.
 
 ## Quickstart
 
@@ -46,7 +50,8 @@ python -m venv .venv && source .venv/bin/activate   # Windows: .\.venv\Scripts\a
 pip install -e ".[dev]"
 
 python ask.py "hardship and ease"
-pytest -q   # 7 tests
+python ask.py "Musa" --data data/quran_full.jsonl --all   # every occurrence, Arabic + English
+pytest -q   # 12 tests
 ```
 
 Real output from the command above:
@@ -77,8 +82,19 @@ python ask.py "hardship and ease" --provider anthropic --api-key sk-ant-... --co
 
 ```bash
 pip install -e ".[web]"
-uvicorn api:app --reload          # open http://localhost:8000
+QURAN_DATA_PATH=data/quran_full.jsonl uvicorn api:app --reload   # open http://localhost:8000
 ```
+
+The web UI runs "every occurrence" search by default: type a topic, get the full list of connected verses (Arabic + English), sortable by relevance or Quran order, with **Show tafseer** and **Explain with AI** on each card.
+
+To enable the semantic layer (conceptual matches beyond shared words), build the embedding index once and provide a key at serve time:
+
+```bash
+NVIDIA_EMBED_API_KEY=nvapi-... python scripts/build_embeddings.py data/quran_full.jsonl data/embeddings.npz
+NVIDIA_EMBED_API_KEY=nvapi-... QURAN_DATA_PATH=data/quran_full.jsonl uvicorn api:app --reload
+```
+
+Without the index or key, search still works on the keyword + TF-IDF layers; `/api/info` reports `semantic_available`.
 
 The committed `web/dist` means `uvicorn api:app` works straight from a clone — no `npm install` required just to try it. To develop or rebuild the frontend:
 
@@ -86,19 +102,40 @@ The committed `web/dist` means `uvicorn api:app` works straight from a clone —
 cd web && npm install && npm run build   # outputs web/dist (served by the backend)
 ```
 
+### Tafseer + AI explanations
+
+If the corpus file has a `tafseer` field per verse (see [Add the full text](#add-the-full-text)), each search result gets an "Explain with tafseer" button. Clicking it sends that verse's tafseer to an LLM and asks for a deep-dive explanation — core meaning, context, and cross-references the tafseer makes to other verses/hadith — tied back to your original question. This is a *separate* mode from `--compose`: it's allowed to draw on the tafseer's commentary, not just quote verses verbatim, so treat its output as one scholar's exegesis rather than the Quran's own words.
+
+It needs a real text-generation LLM, configured via environment variables:
+
+```bash
+# NVIDIA NIM (OpenAI-compatible; needs the `nvidia` extra for TLS certs on some machines)
+pip install -e ".[web,nvidia]"
+NVIDIA_API_KEY=nvapi-... QURAN_DATA_PATH=data/quran_full.jsonl uvicorn api:app --reload
+
+# or Anthropic
+pip install -e ".[web,anthropic]"
+ANTHROPIC_API_KEY=sk-ant-... QURAN_DATA_PATH=data/quran_full.jsonl uvicorn api:app --reload
+```
+
+Without a key set, `/api/info` reports `explain_available: false` and the button is hidden — search still works via TF-IDF with no LLM required.
+
 ## Project structure
 
 ```
 src/groundedrag/
-├── corpus.py      # Passage dataclass + JSONL loader
-├── retriever.py   # TF-IDF cosine retrieval + relevance gate (Retriever, Hit)
-├── answer.py       # GroundedAnswerer: passages mode / LLM-compose mode
-└── providers.py   # LLM interface: MockLLM (tests) + AnthropicLLM
-ask.py             # CLI entry point (argparse)
-api.py             # FastAPI backend; also serves web/dist as static files
-data/quran_sample.jsonl   # 10-verse placeholder corpus — replace with the full text
+├── corpus.py      # Passage dataclass (ref/text/tafseer/arabic) + JSONL loader
+├── retriever.py   # hybrid retrieval: keyword + TF-IDF + semantic, relevance gate, top/all modes
+├── answer.py      # GroundedAnswerer + explain_passage (tafseer deep-dive via LLM)
+└── providers.py   # MockLLM (tests), AnthropicLLM, NvidiaLLM, NvidiaEmbedder
+ask.py             # CLI entry point (argparse; --all for every occurrence)
+api.py             # FastAPI: /api/ask, /api/tafseer, /api/explain; serves web/dist
+scripts/           # data pipeline: PDF parser, merge_arabic, audit_alignment, build_embeddings
+data/quran_sample.jsonl   # 10-verse placeholder corpus (used by tests)
+data/quran_full.jsonl     # 6,139 verses: translation + Arabic + tafseer
+data/embeddings.npz       # semantic index, committed so search works on clone (6139 x 2048)
 web/                # React + Tailwind + Vite frontend (web/dist is the committed build)
-tests/test_quran_rag.py   # 7 tests, including the grounding guarantees
+tests/test_quran_rag.py   # 12 tests, including the grounding guarantees
 ```
 
 ## Key design decisions
@@ -110,21 +147,43 @@ tests/test_quran_rag.py   # 7 tests, including the grounding guarantees
 
 ## Limitations
 
-- **Retrieval quality on longer/conversational queries**: TF-IDF on short documents can let an incidental word match dominate a genuinely relevant passage. For example, a query phrased as a full question containing the word "say" can outrank the actual on-topic verses, because a short verse containing "Say" concentrates its TF-IDF weight on that single token. Short, keyword-style queries (as in the Quickstart example) avoid this; longer natural-language questions may not always surface the best match first.
+- **Retrieval quality on longer/conversational queries**: TF-IDF on short documents can let an incidental word match dominate a genuinely relevant passage; the semantic layer (when enabled) substantially mitigates this, and keyword matching guarantees literal occurrences are never missed — but ranking among hundreds of related verses remains heuristic.
+- **"All" mode is inclusive by design**: a broad topic ("mercy of Allah") can return 1,000+ verses because any verse containing a query word with weak corroboration is included — that's the "every occurrence or relation" contract, with ranking pushing the strongest matches to the top.
+- **Arabic search is exact-token, not root-based**: queries match whole words (with diacritics normalised and clitics like `وَ`/`بِ`/`ٱل`/`يَا` stripped), so `الصبر` finds `بِٱلصَّبْرِ` but not `ٱلصَّٰبِرِينَ` — same ص-ب-ر root, different word. Proper Arabic morphology needs a root analyser; until then the English and semantic layers carry the conceptual recall.
+- **97 verses are missing from the shipped corpus** (6,139 of 6,236) — the PDF parser could not place them unambiguously, and they are omitted rather than filed under a guessed citation. Bring your own corpus for complete coverage.
 - **Sample corpus only**: `data/quran_sample.jsonl` has 10 verses for demonstration. Real use requires supplying a full translation (see below).
 - **No persisted index**: the TF-IDF matrix rebuilds on every process start; fine at this scale, not designed for a large corpus served at production traffic.
 - **No authentication or rate limiting** on the FastAPI backend, and CORS is fully open (`allow_origins=["*"]`) — appropriate for local/demo use, not for public deployment as-is.
 - **Compose mode passes retrieved text into the LLM prompt un-sandboxed**: if you supply an untrusted or adversarial corpus file, injected text inside a "verse" could attempt to steer the LLM despite the grounding prompt. Low risk in normal use since you control your own corpus file, but worth knowing.
+- **The tafseer explain feature is not covered by the grounding guarantee**: it's LLM-synthesized commentary grounded in the tafseer text, not verbatim Quran wording — treat it as one scholar's exegesis (and whichever translation's biases come with it), not as the book's own words the way passages/compose mode are.
 
 ## Add the full text
 
 Replace `data/quran_sample.jsonl` with the full translation you trust — one JSON object per line:
 
 ```json
-{"ref": "2:255", "text": "Allah! There is no god but He, the Living ..."}
+{"ref": "2:255", "text": "Allah! There is no god but He, the Living ...", "tafseer": "optional commentary text for this verse"}
 ```
 
+`tafseer` is optional — omit it (or the key entirely) for a plain verse-only corpus. When present, it powers the web UI's "Explain with tafseer" button (see [Tafseer + AI explanations](#tafseer--ai-explanations)); it plays no part in retrieval or the grounding guarantee, which still rests on `text` alone.
+
 Point `ask.py --data` at your file, or overwrite the sample. No code changes needed; the system indexes whatever you provide.
+
+`data/quran_full.jsonl` ships an example: 6,139 verses with tafseer, parsed from the [Tafseer Hub-e-Ali](https://hubeali.com/tafseerhubeali/) PDFs (a Shia-perspective English tafseer), with Arabic (Uthmani) merged in from [alquran.cloud](https://alquran.cloud). Point `QURAN_DATA_PATH`/`--data` at it, or bring your own trusted translation.
+
+### Rebuilding the corpus
+
+```bash
+pip install -e ".[pipeline]"
+python scripts/hubeali_build_corpus.py                    # PDFs -> text + tafseer
+python scripts/merge_arabic.py arabic.json corpus.jsonl   # add the Arabic
+python scripts/audit_alignment.py ref_en.json corpus.jsonl --realign out.jsonl
+python scripts/build_embeddings.py corpus.jsonl data/embeddings.npz
+```
+
+`audit_alignment.py` is the important one and should be re-run after any corpus rebuild. A duplicated row in the source PDFs shifts every later verse in that chapter down by one, so a verse's translation ends up filed under its neighbour's citation — the worst failure mode for an app whose whole promise is accurate `[chapter:verse]` attribution. The script cross-checks every row against an independent translation, re-keys shifted runs back onto the right refs, and drops the duplicates left over (58 re-keyed, 52 dropped on the shipped corpus, which now audits at **0 misaligned**). Verses it cannot place are omitted rather than guessed at — hence 6,139 of 6,236.
+
+Note that refs change, so `merge_arabic.py` and `build_embeddings.py` must run *after* realignment.
 
 ## Roadmap
 

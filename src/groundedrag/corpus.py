@@ -18,6 +18,8 @@ from pathlib import Path
 class Passage:
     ref: str          # citation reference (verse, sermon, saying number...)
     text: str
+    tafseer: str = ""  # optional commentary/exegesis trailing this passage, if the corpus has it
+    arabic: str = ""   # optional original-language text of the passage
 
 
 def load_corpus(path: str | Path) -> list[Passage]:
@@ -28,5 +30,7 @@ def load_corpus(path: str | Path) -> list[Passage]:
         if not line:
             continue
         row = json.loads(line)
-        passages.append(Passage(ref=str(row["ref"]), text=str(row["text"])))
+        passages.append(Passage(ref=str(row["ref"]), text=str(row["text"]),
+                                 tafseer=str(row.get("tafseer", "")),
+                                 arabic=str(row.get("arabic", ""))))
     return passages

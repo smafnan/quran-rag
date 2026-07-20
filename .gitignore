@@ -9,3 +9,6 @@ Thumbs.db
 web/node_modules/
 web/.vite/
 *.tsbuildinfo
+
+# raw source PDFs for the corpus pipeline (re-downloadable, ~165MB)
+scripts/pdfs/

@@ -69,3 +69,136 @@ def test_compose_mode_uses_llm_and_passages(answerer):
 def test_not_found_has_no_citations(answerer):
     ans = answerer.ask("xyzzy nonsense token")
     assert not ans.found and ans.citations == []
+
+
+# ---------------------------------------------------------------- hybrid search
+
+def test_all_mode_finds_every_keyword_occurrence(passages):
+    """mode='all' must surface every passage containing the topic word."""
+    r = Retriever(passages)
+    hits = r.search("hardship", mode="all")
+    refs = {h.passage.ref for h in hits}
+    expected = {p.ref for p in passages if "hardship" in p.text.lower()}
+    assert expected <= refs
+    assert all("keyword" in h.matched for h in hits if h.passage.ref in expected)
+
+
+def test_all_mode_declines_off_topic(passages):
+    r = Retriever(passages)
+    assert r.search("kubernetes deployment pipeline", mode="all") == []
+
+
+def test_keyword_matches_morphological_variants(passages):
+    """'merciful' should be found when searching 'mercy'."""
+    r = Retriever(passages)
+    hits = r.search("mercy", mode="all")
+    texts = " ".join(h.passage.text.lower() for h in hits)
+    assert "merciful" in texts
+
+
+def test_top_mode_respects_k(passages):
+    r = Retriever(passages)
+    assert len(r.search("Allah", top_k=3)) <= 3
+
+
+def test_passage_optional_fields_default_empty(passages):
+    assert all(p.arabic == "" and p.tafseer == "" for p in passages)
+
+
+# ------------------------------------------------- regression: review findings
+
+from groundedrag.corpus import Passage
+from groundedrag.retriever import _normalize_arabic, _stem
+
+
+@pytest.mark.parametrize("a,b", [
+    ("patience", "patient"), ("patience", "patiently"), ("mercy", "merciful"),
+    ("pray", "prayer"), ("forgive", "forgiveness"), ("believe", "believer"),
+    ("believe", "believing"), ("sign", "signs"), ("guidance", "guide"),
+    ("worship", "worshippers"), ("fast", "fasting"),
+])
+def test_stemmer_unifies_true_variants(a, b):
+    assert _stem(a) == _stem(b)
+
+
+@pytest.mark.parametrize("a,b", [
+    ("angel", "anger"), ("worship", "worse"), ("light", "lightning"),
+    ("charity", "chariot"), ("night", "nigh"), ("sign", "significant"),
+    ("mercy", "merchant"), ("ease", "east"), ("hell", "hello"),
+])
+def test_stemmer_rejects_prefix_twins(a, b):
+    """A shared 4-char prefix must not count as a morphological match."""
+    assert _stem(a) != _stem(b)
+
+
+@pytest.mark.parametrize("cp", [0x64B, 0x652, 0x653, 0x654, 0x670, 0x651])
+def test_arabic_normalization_strips_all_marks(cp):
+    """Harakat through U+065F, plus dagger alef, must not survive."""
+    assert chr(cp) not in _normalize_arabic(f"م{chr(cp)}ن")
+
+
+def test_arabic_dagger_alef_matches_both_spellings():
+    """Uthmani dagger alef reads as both 'with alef' and 'without'."""
+    verses = [
+        Passage("1:2", "The Praise is for Allah, Lord of the Worlds",
+                arabic="ٱلْحَمْدُ لِلَّهِ رَبِّ ٱلْعَٰلَمِينَ"),
+        Passage("1:3", "The Beneficent, the Merciful", arabic="ٱلرَّحْمَٰنِ ٱلرَّحِيمِ"),
+    ]
+    r = Retriever(verses)
+    assert {h.passage.ref for h in r.search("العالمين", mode="all")} == {"1:2"}
+    assert {h.passage.ref for h in r.search("الرحمن", mode="all")} == {"1:3"}
+
+
+def test_arabic_short_particles_do_not_flood():
+    verses = [Passage(f"1:{i}", f"verse {i}", arabic="ٱلْحَمْدُ لِلَّهِ مِن رَبِّ")
+              for i in range(1, 6)]
+    r = Retriever(verses)
+    assert r.search("من", mode="all") == []      # below min term length
+    assert r.search("و", mode="all") == []
+
+
+def test_arabic_partial_match_without_semantic_layer():
+    """Arabic queries have no TF-IDF/semantic corroboration available, so a
+    substantial fraction of terms matching must stand on its own."""
+    verses = [Passage("1:2", "The Praise is for Allah",
+                      arabic="ٱلْحَمْدُ لِلَّهِ رَبِّ ٱلْعَٰلَمِينَ")]
+    r = Retriever(verses)
+    assert {h.passage.ref for h in r.search("الحمد لله العظيم", mode="all")} == {"1:2"}
+
+
+def test_arabic_clitics_stripped(monkeypatch):
+    verses = [Passage("20:11", "O Musa", arabic="يَٰمُوسَىٰ"),
+              Passage("2:153", "with patience", arabic="بِٱلصَّبْرِ")]
+    r = Retriever(verses)
+    assert {h.passage.ref for h in r.search("موسي", mode="all")} == {"20:11"}
+    assert {h.passage.ref for h in r.search("الصبر", mode="all")} == {"2:153"}
+
+
+def test_semantic_layer_degrades_on_bad_embedding(tmp_path, passages):
+    """A dimension mismatch or throwing embedder must fall back to lexical-only,
+    never raise out of search()."""
+    import numpy as np
+    idx = tmp_path / "emb.npz"
+    np.savez_compressed(idx, refs=np.array([p.ref for p in passages]),
+                        matrix=np.zeros((len(passages), 8), dtype=np.float16))
+    for bad in (lambda q: [0.1] * 4,                       # wrong dimension
+                lambda q: [[0.1] * 8],                     # nested payload
+                lambda q: (_ for _ in ()).throw(RuntimeError("boom"))):
+        r = Retriever(passages, embeddings_path=idx, embed_query=bad)
+        assert r.search("mercy") is not None                # no exception
+
+
+def test_embeddings_index_mismatch_disables_semantic(tmp_path, passages, capsys):
+    import numpy as np
+    idx = tmp_path / "emb.npz"
+    np.savez_compressed(idx, refs=np.array(["9:9"] * len(passages)),
+                        matrix=np.zeros((len(passages), 8), dtype=np.float16))
+    r = Retriever(passages, embeddings_path=idx)
+    assert r._sem_matrix is None
+    assert "does not align" in capsys.readouterr().err
+
+
+def test_tfidf_matrix_stays_sparse(passages):
+    """Densifying costs ~0.9 GB on the full corpus for identical math."""
+    from scipy.sparse import issparse
+    assert issparse(Retriever(passages)._matrix)
