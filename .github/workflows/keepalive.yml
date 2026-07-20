@@ -1,45 +1,58 @@
-# Keeps the free-tier backend awake so a shared link responds immediately.
+# Keeps the free-tier backend warm so a shared link answers immediately.
 #
-# Render free instances sleep after ~15 minutes idle and take ~50s to wake. This
-# pings the cheapest endpoint (/api/info reads memory only — no model calls, so
-# it costs no API quota) often enough to prevent that.
+# THE BUDGET, because this is the part that bites:
+#   Render's free tier allows 750 instance-hours per month, and an instance
+#   burns those hours whenever it is awake — including while this workflow is
+#   keeping it awake. Pinging around the clock costs 24 x 31 = 744 hours, which
+#   fits under 750 by six hours. One extra deploy, or a second free service in
+#   the same workspace, and the month is blown — at which point Render suspends
+#   free services until it rolls over. That is a worse outcome than a cold start.
 #
-# Two things worth knowing:
-#  * Render's free tier allows 750 instance-hours per month. A month is ~730
-#    hours, so keeping ONE service awake around the clock fits — but it consumes
-#    nearly the whole allowance. A second always-on free service will not fit.
-#  * GitHub disables scheduled workflows after 60 days without repo activity,
-#    and cron runs can be delayed when Actions is busy. For a link you rely on,
-#    an uptime monitor (or Render's paid tier, which never sleeps) is sturdier.
+#   So this runs on a window instead: every 10 minutes from 05:00-22:59 UTC,
+#   which is roughly 07:00-01:00 in Berlin. That is 18 h/day = ~558 h/month,
+#   leaving ~190 hours of headroom for deploys and experiments. Outside the
+#   window the service sleeps and the first visitor waits ~50s; the UI says so
+#   while they wait.
+#
+#   Widen the window by editing the cron hour range if you have the budget, or
+#   drop the keep-alive entirely and pay for Render's Starter tier, which never
+#   sleeps and removes this whole trade-off.
+#
+# The endpoint pinged is /healthz: it touches no model and no database, so it
+# costs zero API quota.
 name: keepalive
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # every 10 minutes
+    - cron: "*/10 5-22 * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: keepalive
+  cancel-in-progress: true
+
 jobs:
   ping:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Ping the backend
         env:
           URL: ${{ vars.BACKEND_URL }}
         run: |
           if [ -z "$URL" ]; then
-            echo "BACKEND_URL repository variable is not set — nothing to ping."
+            echo "::notice::BACKEND_URL variable is not set — nothing to ping."
             echo "Set it under Settings > Secrets and variables > Actions > Variables."
             exit 0
           fi
-          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 90 "$URL/api/info" || echo 000)
-          echo "GET $URL/api/info -> $code"
-          # a sleeping instance may not answer the very first probe; retry once
-          if [ "$code" != "200" ]; then
-            sleep 20
-            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 90 "$URL/api/info" || echo 000)
-            echo "retry -> $code"
-          fi
-          [ "$code" = "200" ]
+          for attempt in 1 2 3; do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 90 "$URL/healthz" || echo 000)
+            echo "attempt $attempt: GET $URL/healthz -> $code"
+            [ "$code" = "200" ] && exit 0
+            sleep 20   # a sleeping instance often misses the first probe
+          done
+          echo "::warning::backend did not return 200 after 3 attempts"
+          exit 1

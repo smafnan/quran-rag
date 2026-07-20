@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 
@@ -16,8 +17,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from src.groundedrag import (NvidiaEmbedder, RateLimiter, Retriever, client_key,
-                             explain_passage, get_llm, load_corpus)
+from src.groundedrag import (NvidiaEmbedder, RateLimiter, Retriever, TafseerStore,
+                             client_key, explain_passage, get_llm, load_corpus)
 
 ROOT = Path(__file__).resolve().parent
 SOURCE_NAME = "the Quran"
@@ -34,7 +35,13 @@ _default_corpus = ROOT / "data" / "quran_full.jsonl"
 if not _default_corpus.exists():
     _default_corpus = ROOT / "data" / "quran_sample.jsonl"
 _data_path = os.environ.get("QURAN_DATA_PATH", str(_default_corpus))
-_passages = load_corpus(_data_path)
+
+# When the tafseer database is present, keep the commentary on disk (~54 MB of
+# RAM saved) and read it per verse on demand. Falls back to the JSONL's inline
+# tafseer when it is absent, so a plain clone still works.
+_tafseer_db = Path(os.environ.get("TAFSEER_DB", str(ROOT / "data" / "tafseer.sqlite3")))
+_tafseer_store = TafseerStore(_tafseer_db) if _tafseer_db.exists() else None
+_passages = load_corpus(_data_path, load_tafseer=_tafseer_store is None)
 
 # Semantic layer: needs the offline index (scripts/build_embeddings.py) plus a
 # key for query-time embeddings. Without either, search still works via the
@@ -82,6 +89,14 @@ _ask_limiter = RateLimiter(int(os.environ.get("ASK_RATE_LIMIT", "60")), 300)
 _explain_limiter = RateLimiter(int(os.environ.get("EXPLAIN_RATE_LIMIT", "15")), 3600)
 
 
+def _has_tafseer(passage) -> bool:
+    return _tafseer_store.has(passage.ref) if _tafseer_store else bool(passage.tafseer)
+
+
+def _tafseer_for(passage) -> str:
+    return _tafseer_store.get(passage.ref) if _tafseer_store else passage.tafseer
+
+
 def _enforce(limiter: RateLimiter, request: Request, what: str) -> None:
     allowed, retry_after = limiter.check(client_key(request))
     if not allowed:
@@ -101,6 +116,26 @@ class AskRequest(BaseModel):
 class ExplainRequest(BaseModel):
     ref: str = Field(min_length=1, max_length=32)
     question: str = Field(default="", max_length=2000)
+
+
+@app.get("/healthz")
+def healthz():
+    """Liveness: the process is up. Touches nothing, so a slow dependency can
+    never cause the platform to kill an otherwise healthy container."""
+    return {"status": "ok"}
+
+
+@app.get("/readyz")
+def readyz():
+    """Readiness: the corpus and index are actually loaded and searchable."""
+    if not _passages or _retriever is None:
+        raise HTTPException(status_code=503, detail="corpus not loaded")
+    return {
+        "status": "ready",
+        "passages": len(_passages),
+        "semantic": _retriever._sem_matrix is not None,
+        "tafseer_store": _tafseer_store is not None,
+    }
 
 
 @app.get("/api/info")
@@ -131,7 +166,7 @@ def ask(req: AskRequest, request: Request):
                 "arabic": h.passage.arabic,
                 "score": round(h.score, 3),
                 "matched": h.matched,
-                "has_tafseer": bool(h.passage.tafseer),
+                "has_tafseer": _has_tafseer(h.passage),
             }
             for h in hits
         ],
@@ -147,7 +182,7 @@ def tafseer(ref: str):
         "ref": passage.ref,
         "arabic": passage.arabic,
         "text": passage.text,
-        "tafseer": passage.tafseer,
+        "tafseer": _tafseer_for(passage),
     }
 
 
@@ -162,6 +197,8 @@ def explain(req: ExplainRequest, request: Request):
             status_code=503,
             detail="No LLM configured for explanations. Set NVIDIA_API_KEY or ANTHROPIC_API_KEY.",
         )
+    if _tafseer_store is not None:
+        passage = replace(passage, tafseer=_tafseer_store.get(passage.ref))
     try:
         explanation = explain_passage(passage, req.question, _llm, SOURCE_NAME)
     except HTTPError as e:

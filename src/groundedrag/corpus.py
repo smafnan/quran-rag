@@ -22,8 +22,13 @@ class Passage:
     arabic: str = ""   # optional original-language text of the passage
 
 
-def load_corpus(path: str | Path) -> list[Passage]:
-    """Load passages from a JSON Lines file."""
+def load_corpus(path: str | Path, load_tafseer: bool = True) -> list[Passage]:
+    """Load passages from a JSON Lines file.
+
+    Pass ``load_tafseer=False`` to leave the commentary on disk — it dominates
+    the corpus by size but is only needed per-verse on demand, so a server that
+    reads it from a TafseerStore should skip it here.
+    """
     passages: list[Passage] = []
     for line in Path(path).read_text(encoding="utf-8").splitlines():
         line = line.strip()
@@ -31,6 +36,6 @@ def load_corpus(path: str | Path) -> list[Passage]:
             continue
         row = json.loads(line)
         passages.append(Passage(ref=str(row["ref"]), text=str(row["text"]),
-                                 tafseer=str(row.get("tafseer", "")),
+                                 tafseer=str(row.get("tafseer", "")) if load_tafseer else "",
                                  arabic=str(row.get("arabic", ""))))
     return passages

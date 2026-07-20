@@ -1,0 +1,113 @@
+# Builds the production image and proves it actually serves traffic.
+#
+# The test suite exercises the library, but the Dockerfile is what runs in
+# production and nothing was checking it. A broken COPY path, a missing extra or
+# a bad CMD would previously only surface as a failed deploy.
+name: docker
+
+on:
+  push:
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "pyproject.toml"
+      - "api.py"
+      - "src/**"
+      - "scripts/build_tafseer_db.py"
+      - ".github/workflows/docker.yml"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-smoke-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: quran-rag:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Report image size
+        run: docker image inspect quran-rag:ci --format 'image size: {{.Size}} bytes'
+
+      - name: Run the container
+        run: |
+          docker run -d --name app -p 8000:7860 \
+            -e ASK_RATE_LIMIT=0 -e EXPLAIN_RATE_LIMIT=0 quran-rag:ci
+          for i in $(seq 1 45); do
+            if curl -fsS http://localhost:8000/healthz >/dev/null 2>&1; then
+              echo "healthy after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "container never became healthy"; docker logs app; exit 1
+
+      - name: Smoke-test the real endpoints
+        run: |
+          set -euo pipefail
+
+          echo "--- readyz ---"
+          curl -fsS http://localhost:8000/readyz | tee /tmp/ready.json
+          python - <<'PY'
+          import json
+          d = json.load(open("/tmp/ready.json"))
+          assert d["status"] == "ready", d
+          assert d["passages"] > 6000, d          # full corpus is present
+          assert d["tafseer_store"] is True, d    # SQLite built during the image build
+          print("readyz ok:", d)
+          PY
+
+          echo "--- search (lexical; no API key in CI) ---"
+          curl -fsS -X POST http://localhost:8000/api/ask \
+            -H 'Content-Type: application/json' \
+            -d '{"question":"patience","mode":"all"}' -o /tmp/ask.json
+          python - <<'PY'
+          import json
+          d = json.load(open("/tmp/ask.json"))
+          assert d["found"] and d["count"] > 10, d
+          first = d["results"][0]
+          assert first["arabic"], "arabic text missing from results"
+          print("search ok:", d["count"], "hits, first", first["ref"])
+          PY
+
+          echo "--- tafseer comes from the on-disk store ---"
+          curl -fsS 'http://localhost:8000/api/tafseer?ref=94:5' -o /tmp/taf.json
+          python - <<'PY'
+          import json
+          d = json.load(open("/tmp/taf.json"))
+          assert len(d["tafseer"]) > 500, "tafseer not served from SQLite"
+          assert d["arabic"], "arabic missing"
+          print("tafseer ok:", len(d["tafseer"]), "chars")
+          PY
+
+          echo "--- the relevance gate still refuses off-topic queries ---"
+          curl -fsS -X POST http://localhost:8000/api/ask \
+            -H 'Content-Type: application/json' \
+            -d '{"question":"kubernetes cluster configuration","mode":"all"}' -o /tmp/off.json
+          python - <<'PY'
+          import json
+          d = json.load(open("/tmp/off.json"))
+          assert d["found"] is False and d["count"] == 0, d
+          print("relevance gate ok")
+          PY
+
+      - name: Container memory footprint
+        run: |
+          docker stats --no-stream --format '  {{.Name}}: {{.MemUsage}} ({{.MemPerc}})' app
+          echo "  free tier limit is 512 MiB"
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker logs app

@@ -1,0 +1,35 @@
+# Without this the build context is ~500 MB (.venv 311 MB, node_modules 113 MB,
+# .git 28 MB) — all uploaded to the builder on every single build.
+.venv/
+**/node_modules/
+.git/
+.github/
+.pytest_cache/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+
+# corpus pipeline inputs and intermediates — the built artefacts in data/ ship,
+# the 165 MB of source PDFs do not
+scripts/pdfs/
+# build_tafseer_db.py is needed during the image build
+scripts/hubeali_*
+scripts/audit_alignment.py
+scripts/merge_arabic.py
+scripts/build_embeddings.py
+
+# frontend sources; only the built web/dist is served
+web/src/
+web/public/
+web/*.json
+web/*.ts
+web/*.js
+web/*.cjs
+
+tests/
+*.md
+!README.md
+.DS_Store
+Dockerfile
+.dockerignore
+netlify.toml

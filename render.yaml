@@ -9,7 +9,9 @@ services:
     runtime: docker
     dockerfilePath: ./Dockerfile
     plan: free
-    healthCheckPath: /api/info
+    # liveness only: /healthz touches no dependency, so a slow upstream can
+    # never make the platform restart a container that is actually fine
+    healthCheckPath: /healthz
     envVars:
       - key: QURAN_DATA_PATH
         value: /home/user/app/data/quran_full.jsonl

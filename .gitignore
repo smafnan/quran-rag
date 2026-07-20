@@ -12,3 +12,6 @@ web/.vite/
 
 # raw source PDFs for the corpus pipeline (re-downloadable, ~165MB)
 scripts/pdfs/
+
+# derived from quran_full.jsonl at build time (scripts/build_tafseer_db.py)
+data/tafseer.sqlite3
