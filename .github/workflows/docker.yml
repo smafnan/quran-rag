@@ -40,7 +40,8 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Report image size
-        run: docker image inspect quran-rag:ci --format 'image size: {{.Size}} bytes'
+        run: |
+          docker image inspect quran-rag:ci --format 'image size: {{.Size}} bytes'
 
       - name: Run the container
         run: |
