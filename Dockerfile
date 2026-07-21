@@ -1,46 +1,42 @@
-# Multi-stage: wheels are built in a throwaway stage so the runtime image never
-# carries pip's cache or any build tooling.
+# Single container: the FastAPI API plus the built React UI. Honours $PORT, so
+# the same image runs on Render, Fly, or a Hugging Face Space.
 #
-# Runs the API and the built UI from one container. Honours $PORT, so the same
-# image works on Render, Fly, or a Hugging Face Space.
-
-# ---------- builder ----------
-FROM python:3.12-slim AS builder
-
-ENV PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
-
-WORKDIR /build
-COPY pyproject.toml README.md ./
-COPY src ./src
-# Resolve once into a prefix we can copy wholesale into the runtime stage.
-RUN pip install --prefix=/install --no-cache-dir ".[web,nvidia]"
-
-# ---------- runtime ----------
-FROM python:3.12-slim AS runtime
+# Deliberately single-stage with `pip install --user`: this is the pattern that
+# builds and boots cleanly on Render's free tier. An earlier multi-stage variant
+# (pip --prefix into a throwaway stage, then COPY into /usr/local) shaved image
+# size but never deployed — the copied environment failed to import at runtime,
+# so the health check never passed and Render kept the previous image. Reliability
+# beats a smaller image here.
+FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Run unprivileged: a container that never needs to write shouldn't be root.
+# Run unprivileged: the container never needs to write outside its own data dir.
 RUN useradd --create-home --uid 1000 app
+USER app
 WORKDIR /home/app/api
 
-COPY --from=builder /install /usr/local
-
+# Dependencies first, as their own cache layer. --user installs console scripts
+# (uvicorn) into ~/.local/bin, which the PATH below picks up.
+COPY --chown=app:app pyproject.toml README.md ./
 COPY --chown=app:app src ./src
-COPY --chown=app:app api.py ask.py pyproject.toml README.md ./
+RUN pip install --user --no-cache-dir ".[web,nvidia]"
+ENV PATH="/home/app/.local/bin:$PATH"
+
+# App code, data, and the built UI.
+COPY --chown=app:app api.py ask.py ./
 COPY --chown=app:app data/quran_full.jsonl data/embeddings.npz ./data/
 COPY --chown=app:app scripts/build_tafseer_db.py ./scripts/
 COPY --chown=app:app web/dist ./web/dist
 
 # Derive the commentary database in the image rather than committing 28 MB of
 # generated data. The JSONL stays the single source of truth; the server reads
-# tafseer from SQLite so it never occupies resident memory.
+# tafseer from SQLite so it never occupies resident memory. Built and read by the
+# same (app) user, so no cross-user permission problem.
 RUN python scripts/build_tafseer_db.py data/quran_full.jsonl data/tafseer.sqlite3
-
-USER app
 
 ENV QURAN_DATA_PATH=/home/app/api/data/quran_full.jsonl \
     EMBEDDINGS_PATH=/home/app/api/data/embeddings.npz \
@@ -49,9 +45,10 @@ ENV QURAN_DATA_PATH=/home/app/api/data/quran_full.jsonl \
 
 EXPOSE 7860
 
-# Liveness only — never gate the container's health on a network dependency.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD python -c "import os,urllib.request;urllib.request.urlopen(f'http://127.0.0.1:{os.environ[\"PORT\"]}/healthz',timeout=4)" || exit 1
+# Liveness only — /healthz touches no dependency, so a slow upstream can never
+# make the platform restart a container that is actually fine.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=25s --retries=3 \
+  CMD python -c "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','7860')+'/healthz',timeout=4)" || exit 1
 
 # One worker on purpose: the free instance has 512 MB and each worker would load
 # its own copy of the corpus and index. Scale with instances, not workers.
