@@ -15,3 +15,7 @@ scripts/pdfs/
 
 # derived from quran_full.jsonl at build time (scripts/build_tafseer_db.py)
 data/tafseer.sqlite3
+
+# Claude Design handoff bundle dropped by /design-login — a local mirror of the
+# design project, not application code. Kept out of the repo.
+quran-rag-design-overhaul/

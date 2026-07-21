@@ -2,8 +2,51 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Design tokens ported verbatim from the Claude Design "Quran RAG" file, so the
+   app and the design share one source of truth for colour. Light is the default
+   theme; [data-theme="dark"] is applied by the header toggle. */
 :root {
+  --bg: #f5edde;
+  --bg2: #ebe1ce;
+  --surface: #fefbf3;
+  --surface2: #f3e9d6;
+  --ink: #1b2436;
+  --ink-soft: #565e6e;
+  --ink-faint: #8c8b7f;
+  --brass: #9a6b2f;
+  --brass-2: #b7873b;
+  --brass-soft: rgba(154, 107, 47, 0.09);
+  --line: rgba(27, 36, 54, 0.12);
+  --line-strong: rgba(27, 36, 54, 0.2);
+  --arabic: #14203a;
+  --glow: rgba(183, 135, 59, 0.28);
+  --danger: #a8402f;
+  --ar-scale: 1;
+  --ar-font: "Amiri", serif;
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --bg: #0c1626;
+  --bg2: #091220;
+  --surface: #122238;
+  --surface2: #0f1e31;
+  --ink: #f3ebd8;
+  --ink-soft: rgba(243, 235, 216, 0.7);
+  --ink-faint: rgba(243, 235, 216, 0.44);
+  --brass: #d9b267;
+  --brass-2: #c9a24b;
+  --brass-soft: rgba(217, 178, 103, 0.1);
+  --line: rgba(217, 178, 103, 0.16);
+  --line-strong: rgba(217, 178, 103, 0.3);
+  --arabic: #f6efdc;
+  --glow: rgba(217, 178, 103, 0.24);
+  --danger: #e8a598;
   color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
 }
 
 html,
@@ -14,15 +57,103 @@ body,
 
 body {
   margin: 0;
-  font-family: "Inter", system-ui, sans-serif;
-  background: #050b09;
+  font-family: "Newsreader", Georgia, serif;
+  background: var(--bg2);
+  color: var(--ink);
   -webkit-font-smoothing: antialiased;
+  transition: background 0.3s ease, color 0.3s ease;
+}
+
+a {
+  color: var(--brass);
+  text-decoration: none;
+}
+a:hover {
+  color: var(--brass-2);
+}
+input::placeholder {
+  color: var(--ink-faint);
+}
+
+@keyframes auroraDrift {
+  0% {
+    transform: translate3d(-50%, -3%, 0) scale(1.02);
+    opacity: 0.85;
+  }
+  50% {
+    transform: translate3d(-50%, 4%, 0) scale(1.14);
+    opacity: 1;
+  }
+  100% {
+    transform: translate3d(-50%, -3%, 0) scale(1.02);
+    opacity: 0.85;
+  }
+}
+@keyframes softPulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+  }
 }
 
 ::-webkit-scrollbar {
   width: 10px;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--line-strong);
   border-radius: 999px;
+}
+
+/* Interactive helpers — inline styles can't express :hover, so the base look
+   stays inline (for design fidelity) and only the hover deltas live here. */
+.dc-pill {
+  transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease,
+    transform 0.15s ease;
+}
+.dc-pill:hover {
+  background: var(--brass-soft);
+  border-color: var(--brass);
+  color: var(--brass);
+}
+.dc-pill:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.dc-solid {
+  transition: filter 0.2s ease, opacity 0.2s ease;
+}
+.dc-solid:hover {
+  filter: brightness(1.06);
+}
+.dc-solid:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.dc-navlink {
+  transition: color 0.2s ease;
+}
+.dc-chip {
+  transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+.dc-chip:hover {
+  border-color: var(--brass);
+  color: var(--brass);
+}
+.dc-underline {
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 3px;
+  transition: color 0.2s ease;
+}
+.dc-underline:hover {
+  color: var(--brass-2);
 }

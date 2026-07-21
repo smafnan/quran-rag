@@ -85,7 +85,7 @@ pip install -e ".[web]"
 QURAN_DATA_PATH=data/quran_full.jsonl uvicorn api:app --reload   # open http://localhost:8000
 ```
 
-The web UI runs "every occurrence" search by default: type a topic, get the full list of connected verses (Arabic + English), sortable by relevance or Quran order, with **Show tafseer** and **Explain with AI** on each card.
+The web UI runs "every occurrence" search by default: type a topic, get the full list of connected verses (Arabic + English), sortable by relevance or Quran order, with **Show tafsīr** and **Explain with AI** on each card. It ships a warm, editorial theme with **light and dark modes**, a **choice of five Arabic fonts** (Amiri, Scheherazade, Noto Naskh, Markazi, Aref Ruqaa), and a **reading-size control** — all client-side. Colours are driven by CSS variables in `web/src/index.css`, so re-theming is a token edit.
 
 To enable the semantic layer (conceptual matches beyond shared words), build the embedding index once and provide a key at serve time:
 
