@@ -13,20 +13,15 @@ services:
     # never make the platform restart a container that is actually fine
     healthCheckPath: /healthz
     envVars:
-      # Data paths are deliberately NOT set here. The image already declares
+      # Data paths and PORT are deliberately NOT set here. The image declares the
       # correct absolute paths in its ENV block, and a blueprint value overrides
-      # the image's — so a stale path here silently crashes the container at
-      # import (this happened: these pointed at a previous WORKDIR).
+      # the image's — a stale path here would crash the container at import. PORT
+      # is injected by Render; the container binds ${PORT}, falling back to 7860.
       #
-      # PORT is likewise left to Render, which injects its own; the container
-      # binds ${PORT} and falls back to 7860 elsewhere.
-      #
-      # Pin CORS to the site's own origin so an arbitrary page cannot drive the
-      # API against this deployment's key from a visitor's browser. Render
-      # prompts for it; use the service URL, e.g. https://<name>.onrender.com
-      - key: ALLOWED_ORIGINS
-        sync: false
-      # set these in the Render dashboard (or when prompted on first deploy)
+      # Only the two NVIDIA keys are declared, as secrets. Nothing else is
+      # `sync: false`: an unset required var can block a Blueprint deploy from
+      # completing, and CORS already defaults to open (ALLOWED_ORIGINS is an
+      # optional lock-down you can add in the dashboard, not a deploy gate).
       - key: NVIDIA_API_KEY
         sync: false
       - key: NVIDIA_EMBED_API_KEY
