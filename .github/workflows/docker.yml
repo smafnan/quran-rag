@@ -104,10 +104,13 @@ jobs:
           curl -fsS "http://localhost:8000${asset}" -o /dev/null
           echo "UI ok: index.html + ${asset}"
 
-          echo "--- the relevance gate still refuses off-topic queries ---"
+          echo "--- the relevance gate refuses an off-topic query (exact, no spell-correction) ---"
+          # exact:true disables the spell-correction layer, so this tests the gate
+          # itself. Without it, "cluster" is corrected to "clusters" and matches the
+          # Qur'ān's palm-tree "clusters" verses — the feature working, not the gate.
           curl -fsS -X POST http://localhost:8000/api/ask \
             -H 'Content-Type: application/json' \
-            -d '{"question":"kubernetes cluster configuration","mode":"all"}' -o /tmp/off.json
+            -d '{"question":"kubernetes cluster configuration","mode":"all","exact":true}' -o /tmp/off.json
           python - <<'PY'
           import json
           d = json.load(open("/tmp/off.json"))
