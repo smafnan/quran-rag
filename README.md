@@ -7,6 +7,26 @@ Answers questions strictly and only from the Quran, always with `[chapter:verse]
 ![FastAPI](https://img.shields.io/badge/web-FastAPI%20%2B%20React-009688)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
+**[▶ Live demo](https://quran-rag-kc6e.onrender.com)** — hosted free on Render, so the first request after an idle spell takes ~50s to wake.
+
+## Screenshots
+
+A warm, editorial UI with light **and** dark themes, a choice of five Arabic fonts, and a reading-size control — the verse stays the hero, every answer cited.
+
+|  |  |
+|---|---|
+| ![Ask a question — the hero and grounded search box](docs/screenshots/01-hero-light.png) | ![Every connected verse, with Arabic-font and reading-size controls](docs/screenshots/02-results-light.png) |
+| ![The tafsīr rendered inline beneath a verse](docs/screenshots/03-tafsir-light.png) | ![The same interface in dark mode](docs/screenshots/04-hero-dark.png) |
+
+**Highlights**
+
+- **Every-occurrence search** across the whole Qur'ān — ranked, with relevance diamonds and a match label (word match / related by meaning)
+- **Arabic + English** together, each verse cited `[chapter:verse]` with its sūrah name
+- **Show tafsīr** (source commentary) and **Explain with AI** (composed strictly from that tafsīr) on every verse
+- **Light / dark** themes, **five Arabic fonts** (Amiri, Scheherazade, Noto Naskh, Markazi, Aref Ruqaa), and a **reading-size** control
+- **Spelling- and transliteration-aware** — "Moses" finds *Musa*, typos are corrected, and genuinely ambiguous input gets a "did you mean"
+- **Honest relevance gate** — declines topics the text doesn't address instead of forcing a weak match
+
 ## What it does
 
 Enter a topic and the system finds **every verse connected to it across the whole corpus** — shown in Arabic and English with `[chapter:verse]` citations, the tafseer one click away. Search is hybrid, three layers deep:
@@ -19,7 +39,7 @@ Two retrieval modes: `top` (best k hits, the default for the CLI) and `all` (eve
 
 A relevance gate sits in front of everything: if no verse clears any layer's threshold, the system says the topic isn't addressed instead of forcing a weak match or inventing an answer. The test suite (`tests/test_quran_rag.py`) directly asserts this guarantee — citations must be verbatim substrings of the corpus, and off-topic questions must be declined.
 
-The repo ships with a **10-verse sample corpus** (`data/quran_sample.jsonl`) so it runs out of the box, plus a full 6,191-verse corpus with Arabic and tafseer (`data/quran_full.jsonl`); see [Add the full text](#add-the-full-text).
+The repo ships with a **10-verse sample corpus** (`data/quran_sample.jsonl`) so it runs out of the box, plus a full 6,139-verse corpus with Arabic and tafseer (`data/quran_full.jsonl`); see [Add the full text](#add-the-full-text).
 
 ## Architecture
 
